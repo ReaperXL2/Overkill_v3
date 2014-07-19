@@ -334,9 +334,7 @@ static int ct406_write_enable(struct ct406_data *ct)
 	if (ct406_debug & CT406_DBG_ENABLE_DISABLE)
 		pr_info("%s: writing ENABLE=0x%02x\n", __func__, reg_data[1]);
 
-	error = ct406_i2c_write(ct, reg_data, 1);
-
-	return error;
+	return ct406_i2c_write(ct, reg_data, 1);
 }
 
 static int ct406_set_als_enable(struct ct406_data *ct,
@@ -430,7 +428,7 @@ static int ct406_init_registers(struct ct406_data *ct)
 	/* write proximity interrupt persistence */
 	ct->prox_ppers = CT406_PERS_PPERS;
 	reg_data[0] = CT406_PERS;
-	reg_data[1] = ct->prox_ppers;
+	reg_data[1] = CT406_PERS_PPERS;
 	error = ct406_i2c_write(ct, reg_data, 1);
 	if (error < 0)
 		return error;
@@ -566,7 +564,7 @@ static void ct406_prox_mode_uncovered(struct ct406_data *ct)
 		piht = ct->pdata_max;
 #ifdef CONFIG_TOUCHSCREEN_PREVENT_SLEEP
 	prox_covered = false;
-	if(ct_suspended)
+	if (ct_suspend)
 		touch_resume();
 #endif
 	ct->prox_mode = CT406_PROX_MODE_UNCOVERED;
@@ -590,7 +588,7 @@ static void ct406_prox_mode_covered(struct ct406_data *ct)
 	ct406_write_prox_thresholds(ct);
 #ifdef CONFIG_TOUCHSCREEN_PREVENT_SLEEP
 	prox_covered = true;
-	if (ct_suspended) {
+	if (ct_supend){
 		touch_suspend();
 	}
 #endif
@@ -715,7 +713,7 @@ static int ct406_enable_als(struct ct406_data *ct)
 
 	/* write ALS interrupt persistence */
 	reg_data[0] = CT406_PERS;
-	reg_data[1] = ct->prox_ppers;
+	reg_data[1] = CT406_PERS_PPERS;
 	error = ct406_i2c_write(ct, reg_data, 1);
 	if (error < 0) {
 		pr_err("%s: Error  %d\n", __func__, error);
@@ -762,7 +760,7 @@ static int ct406_disable_als(struct ct406_data *ct)
 	return 0;
 }
 
-static int ct406_measure_noise_floor(struct ct406_data *ct)
+static void ct406_measure_noise_floor(struct ct406_data *ct)
 {
 	int error = -EINVAL;
 	unsigned int num_samples = ct->pdata->prox_samples_for_noise_floor;
@@ -773,55 +771,37 @@ static int ct406_measure_noise_floor(struct ct406_data *ct)
 	int prox_count = 0;
 	u8 status = 0;
 
-	reg_data[0] = CT406_ENABLE;
-	error = ct406_i2c_read(ct, reg_data, 1);
-	if (error) {
-		pr_err("%s: Error reading enable register: %d\n",
-			__func__, error);
-		return error;
-	}
-	enable_reg = reg_data[0];
-
-	reg_data[0] = CT406_ENABLE;
-	reg_data[1] = CT406_ENABLE_PEN | CT406_ENABLE_PON;
-	error = ct406_i2c_write(ct, reg_data, 1);
-	if (error < 0) {
-		pr_err("%s: Error  %d\n", __func__, error);
-		return error;
-	}
-
-	do {
-		reg_data[0] = CT406_STATUS;
-		error = ct406_i2c_read(ct, reg_data, 1);
-		if (error < 0)
-			return error;
-		status = reg_data[0];
-		if (!(status & CT406_STATUS_PVALID)) {
-			prox_count++;
-			if (prox_count >= CT406_MAX_PROX_WAIT) {
-				pr_err("%s: Prox valid timeout.\n"
-					, __func__);
-				break;
-			}
-			usleep_range(2000, 3000);
-		}
-	} while (!(status & CT406_STATUS_PVALID));
-
 	for (i = 0; i < num_samples; i++) {
+		/* enable prox sensor and wait */
+		error = ct406_set_prox_enable(ct, 1);
+		if (error) {
+			pr_err("%s: Error enabling proximity sensor: %d\n",
+				__func__, error);
+			break;
+		}
+		usleep_range(12000, 12100);
 
 		reg_data[0] = (CT406_PDATA | CT406_COMMAND_AUTO_INCREMENT);
 		error = ct406_i2c_read(ct, reg_data, 2);
 		if (error) {
 			pr_err("%s: Error reading prox data: %d\n",
 				__func__, error);
-			return error;
+			break;
 		}
 		sum += (reg_data[1] << 8) | reg_data[0];
-		if (i < (num_samples - 1))
-			usleep_range(6000, 7000);
+
+		/* disable prox sensor */
+		error = ct406_set_prox_enable(ct, 0);
+		if (error) {
+			pr_err("%s: Error disabling proximity sensor: %d\n",
+				__func__, error);
+			break;
+		}
 	}
 
-	avg = sum / num_samples;
+	if (!error)
+		avg = sum / num_samples;
+
 	if (avg < max)
 		ct->prox_noise_floor = avg;
 	else
@@ -840,23 +820,13 @@ static int ct406_measure_noise_floor(struct ct406_data *ct)
 	}
 
 	ct->prox_mode = CT406_PROX_MODE_STARTUP;
-	ct->prox_low_threshold = 1;
+	ct->prox_low_threshold = 0;
 	ct->prox_high_threshold = 0;
 	ct406_write_prox_thresholds(ct);
-
-	ct->prox_ppers = 0;
-	reg_data[0] = CT406_PERS;
-	reg_data[1] = ct->als_apers;
-	error = ct406_i2c_write(ct, reg_data, 1);
-	if (error) {
-		pr_err("%s: Error setting proximity persistance: %d\n",
-			__func__, error);
-		return error;
-	}
-	ct->prox_first_report = 0;
+	pr_info("%s: Prox mode startup\n", __func__);
 
 	error = ct406_set_prox_enable(ct, 1);
-	if (error) {
+	if (error)
 		pr_err("%s: Error enabling proximity sensor: %d\n",
 			__func__, error);
 		return error;
@@ -880,9 +850,9 @@ static int ct406_enable_prox(struct ct406_data *ct)
 			return error;
 	}
 
-	error = ct406_measure_noise_floor(ct);
+	ct406_measure_noise_floor(ct);
 
-	return error;
+	return 0;
 }
 
 static int ct406_disable_prox(struct ct406_data *ct)
@@ -899,6 +869,7 @@ static int ct406_disable_prox(struct ct406_data *ct)
 			pr_info("%s: Powering off\n", __func__);
 		ct406_device_power_off(ct);
 	}
+
 	return 0;
 }
 
@@ -930,7 +901,7 @@ static void ct406_report_prox(struct ct406_data *ct)
 
 	pdata = (reg_data[1] << 8) | reg_data[0];
 	if (ct406_debug & CT406_DBG_INPUT)
-		pr_info("%s: PDATA = 0x%04x\n", __func__, pdata);
+		pr_info("%s: PDATA = %d\n", __func__, pdata);
 
 	switch (ct->prox_mode) {
 	case CT406_PROX_MODE_UNKNOWN:
@@ -938,8 +909,7 @@ static void ct406_report_prox(struct ct406_data *ct)
 		wake_unlock(&ct->wl);
 		break;
 	case CT406_PROX_MODE_UNCOVERED:
-		if (pdata < ct->prox_low_threshold) {
-			pr_info("%s: Prox mode recalibrate\n", __func__);
+		if (pdata < ct->prox_low_threshold)
 			ct406_enable_prox(ct);
 		}
 		if (pdata > ct->prox_high_threshold) {
@@ -1088,7 +1058,7 @@ static void ct406_report_als(struct ct406_data *ct)
 	if (ct->als_first_report == 0) {
 		/* write ALS interrupt persistence */
 		reg_data[0] = CT406_PERS;
-		reg_data[1] = ct->prox_ppers | ct->als_apers;
+		reg_data[1] = CT406_PERS_PPERS | ct->als_apers;
 		error = ct406_i2c_write(ct, reg_data, 1);
 		if (error < 0) {
 			pr_err("%s: Error  %d\n", __func__, error);
@@ -1439,8 +1409,7 @@ static void ct406_work_prox_start(struct work_struct *work)
 		container_of(work, struct ct406_data, work_prox_start);
 
 	mutex_lock(&ct->mutex);
-	if (ct->prox_starting) {
-		pr_info("%s: Prox mode start\n", __func__);
+	if (ct->prox_starting)
 		ct406_enable_prox(ct406_misc_data);
 	}
 	ct->prox_starting = 0;
@@ -1487,26 +1456,26 @@ static void ct406_resume(struct early_suspend *handler)
 #ifdef CONFIG_TOUCHSCREEN_PREVENT_SLEEP
 #ifdef CONFIG_POWERSUSPEND
 static void ct_power_suspend(struct power_suspend *h) {
-	struct ct406_data *ct = ct406_misc_data;
-	
-	ct_suspended = true;
-	if (!ct->prox_enabled) {
+	 struct ct406_data *ct = ct406_misc_data;
+
+ 	ct_suspended = true;
+	if (!ct->prox_enabled && (s2w_switch > 0 || dt2w_switch > 0)) {
 		forced = true;
-		ct406_enable_prox(ct);
-	}
+		 ct406_enable_prox(ct);
+	 }
 }
 
 static void ct_power_resume(struct power_suspend *h) {
-	ct_suspended = false;
-	if (forced) {
-		ct406_disable_prox(ct406_misc_data);
-		forced = false;
-	}
+		 ct_suspended = false;
+	 if (forced) {
+		 ct406_disable_prox(ct406_misc_data);
+	 forced = false;
+     }
 }
 
 static struct power_suspend ct_power_suspend_handler = {
-	.suspend = ct_power_suspend,
-	.resume = ct_power_resume,
+	 .suspend = ct_power_suspend,
+	 .resume = ct_power_resume,
 };
 #endif
 #endif
@@ -1702,7 +1671,8 @@ static int ct406_probe(struct i2c_client *client,
 		goto error_revision_read_failed;
 	}
 #ifdef CONFIG_TOUCHSCREEN_PREVENT_SLEEP
-	ct406_enable_prox(ct);
+	 if (s2w_switch > 0 || dt2w_switch > 0)
+		 ct406_enable_prox(ct)
 #endif
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
