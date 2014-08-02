@@ -3,6 +3,7 @@
  *
  *
  * Copyright (c) 2013, Dennis Rassmann <showp1984@gmail.com>
+ * Copyright (c) 2014, savoca <adeddo27@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,7 +44,7 @@
 /* Version, author, desc, etc */
 #define DRIVER_AUTHOR "Dennis Rassmann <showp1984@gmail.com>"
 #define DRIVER_DESCRIPTION "Sweep2wake for almost any device"
-#define DRIVER_VERSION "1.5"
+#define DRIVER_VERSION "0"
 #define LOGTAG "[sweep2wake]: "
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
@@ -54,23 +55,34 @@ MODULE_LICENSE("GPLv2");
 /* Tuneables */
 #define S2W_DEBUG		0
 #define S2W_DEFAULT		0
-#define S2W_S2SONLY_DEFAULT	0
-#define S2W_PWRKEY_DUR          10
+#define S2W_PWRKEY_DUR          60
 
-#define DEFAULT_S2W_Y_MAX               1280
-#define DEFAULT_S2W_X_MAX               720
-#define DEFAULT_S2W_Y_LIMIT             DEFAULT_S2W_Y_MAX-100
-#define DEFAULT_S2W_X_B1                130
-#define DEFAULT_S2W_X_B2                360
-#define DEFAULT_S2W_X_FINAL             160
+#define DEFAULT_S2W_Y_MAX	1280
+#define DEFAULT_S2W_X_MAX	720
+#define DEFAULT_S2W_Y_LIMIT	DEFAULT_S2W_Y_MAX-100
+#define DEFAULT_S2W_X_B1	130
+#define DEFAULT_S2W_X_B2	360
+#define DEFAULT_S2W_X_FINAL	160
+
+/* Right -> Left */
+#define S2W_X_B0		430
+#define S2W_X_B1		S2W_X_B0-300
+#define S2W_X_B2		S2W_X_B0-70
+
+/* Left -> Right */
+#define S2W_X_B3		S2W_X_B0+60
+#define S2W_X_B4		DEFAULT_S2W_X_MAX-145
+#define S2W_X_B5		DEFAULT_S2W_X_MAX-S2W_X_B0	
 
 /* Resources */
-int s2w_switch = S2W_DEFAULT, s2w_s2sonly = S2W_S2SONLY_DEFAULT;
+int s2w_switch = S2W_DEFAULT;
 bool s2w_scr_suspended = false;
+int s2d_enabled = 0;
 static int touch_x = 0, touch_y = 0;
 static bool touch_x_called = false, touch_y_called = false;
 static bool exec_count = true;
 static bool scr_on_touch = false, barrier[2] = {false, false};
+static bool r_barrier[2] = {false, false};
 //static struct notifier_block s2w_lcd_notif;
 static struct input_dev * sweep2wake_pwrdev;
 static DEFINE_MUTEX(pwrkeyworklock);
@@ -85,21 +97,10 @@ static int s2w_threshold = DEFAULT_S2W_X_FINAL;
 
 static int s2w_swap_coord = 0;
 
-/* Read cmdline for s2w */
-static int __init read_s2w_cmdline(char *s2w)
-{
-	if (strcmp(s2w, "1") == 0) {
-		pr_info("[cmdline_s2w]: Sweep2Wake enabled. | s2w='%s'\n", s2w);
-		s2w_switch = 1;
-	} else if (strcmp(s2w, "0") == 0) {
-		pr_info("[cmdline_s2w]: Sweep2Wake disabled. | s2w='%s'\n", s2w);
-		s2w_switch = 0;
-	} else {
-		pr_info("[cmdline_s2w]: No valid input found. Going with default: | s2w='%u'\n", s2w_switch);
-	}
-	return 1;
-}
-__setup("s2w=", read_s2w_cmdline);
+int down_kcal = 50;
+module_param(down_kcal, int, 0664);
+int up_kcal = 50;
+module_param(up_kcal, int, 0644);
 
 /* PowerKey work func */
 static void sweep2wake_presspwr(struct work_struct * sweep2wake_presspwr_work) {
@@ -117,7 +118,7 @@ static void sweep2wake_presspwr(struct work_struct * sweep2wake_presspwr_work) {
 static DECLARE_WORK(sweep2wake_presspwr_work, sweep2wake_presspwr);
 
 /* PowerKey trigger */
-static void sweep2wake_pwrtrigger(void) {
+void sweep2wake_pwrtrigger(void) {
 	schedule_work(&sweep2wake_presspwr_work);
         return;
 }
@@ -127,6 +128,8 @@ static void sweep2wake_reset(void) {
 	exec_count = true;
 	barrier[0] = false;
 	barrier[1] = false;
+	r_barrier[0] = false;
+	r_barrier[1] = false;
 	scr_on_touch = false;
 }
 
@@ -135,11 +138,12 @@ static void detect_sweep2wake(int sweep_coord, int sweep_height, bool st)
 {
 	int swap_temp1, swap_temp2;
 	int prev_coord = 0, next_coord = 0;
+	int r_prev_coord = 0, r_next_coord = 0;
 	bool single_touch = st;
-#if S2W_DEBUG
-        pr_info(LOGTAG"x,y(%4d,%4d) single:%s\n",
-                sweep_coord, sweep_height, (single_touch) ? "true" : "false");
-#endif
+
+	if ((s2w_switch > 1) && (s2d_enabled))
+		s2d_enabled = 0;
+
 	if (s2w_swap_coord == 1) {
 		//swap the coordinate system
 		swap_temp1 = sweep_coord;
@@ -176,7 +180,7 @@ static void detect_sweep2wake(int sweep_coord, int sweep_height, bool st)
 			}
 		}
 	//power off
-	} else if ((single_touch) && (s2w_scr_suspended == false) && (s2w_switch > 0)) {
+	} else if ((single_touch) && (s2w_scr_suspended == false) && ((s2w_switch) || (s2d_enabled))) {
 		if (s2w_swap_coord == 1) {
 			//swap back for off scenario ONLY
 			swap_temp1 = sweep_coord;
@@ -206,8 +210,41 @@ static void detect_sweep2wake(int sweep_coord, int sweep_height, bool st)
 				    (sweep_height > DEFAULT_S2W_Y_LIMIT)) {
 					if (sweep_coord < DEFAULT_S2W_X_FINAL) {
 						if (exec_count) {
-							pr_info(LOGTAG"OFF\n");
-							sweep2wake_pwrtrigger();
+							pr_info(LOGTAG"EXEC_COUNT\n");
+							if (s2d_enabled)
+								kcal_send_s2d(1);
+							else
+								sweep2wake_pwrtrigger();
+							exec_count = false;
+						}
+					}
+				}
+			}
+		}
+		r_prev_coord = S2W_X_B0;
+		r_next_coord = S2W_X_B3;
+		if ((r_barrier[0] == true) ||
+		   ((sweep_coord > r_prev_coord) &&
+		    (sweep_coord < r_next_coord) &&
+		    (sweep_height > DEFAULT_S2W_Y_LIMIT))) {
+			r_prev_coord = r_next_coord;
+			r_next_coord = S2W_X_B4;
+			r_barrier[0] = true;
+			if ((r_barrier[1] == true) ||
+			   ((sweep_coord > r_prev_coord) &&
+			    (sweep_coord < r_next_coord) &&
+			    (sweep_height > DEFAULT_S2W_Y_LIMIT))) {
+				r_prev_coord = r_next_coord;
+				r_barrier[1] = true;
+				if ((sweep_coord > r_prev_coord) &&
+				    (sweep_height > DEFAULT_S2W_Y_LIMIT)) {
+					if (sweep_coord > S2W_X_B5) {
+						if (exec_count) {
+							pr_info(LOGTAG"EXEC_COUNT\n");
+							if (s2d_enabled)
+								kcal_send_s2d(2);
+							else
+								sweep2wake_pwrtrigger();
 							exec_count = false;
 						}
 					}
@@ -456,17 +493,18 @@ static struct input_handler s2w_input_handler = {
 };
 
 #ifdef CONFIG_POWERSUSPEND
-static void s2w_power_suspend(struct power_suspend *h) {
+static void s2w_early_suspend(struct power_suspend *h) {
 	s2w_scr_suspended = true;
 }
 
-static void s2w_power_resume(struct power_suspend *h) {
+static void s2w_late_resume(struct power_suspend *h) {
 	s2w_scr_suspended = false;
 }
 
-static struct power_suspend s2w_power_suspend_handler = {
-	.suspend = s2w_power_suspend,
-	.resume = s2w_power_resume,
+static struct power_suspend s2w_early_suspend_handler = {
+	.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN,
+	.suspend = s2w_early_suspend,
+	.resume = s2w_late_resume,
 };
 #endif
 
@@ -486,7 +524,7 @@ static ssize_t s2w_sweep2wake_show(struct device *dev,
 static ssize_t s2w_sweep2wake_dump(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+	if (buf[0] >= '0' && buf[0] <= '2' && buf[1] == '\n')
                 if (s2w_switch != buf[0] - '0')
 		        s2w_switch = buf[0] - '0';
 
@@ -496,47 +534,28 @@ static ssize_t s2w_sweep2wake_dump(struct device *dev,
 static DEVICE_ATTR(sweep2wake, (S_IWUSR|S_IRUGO),
 	s2w_sweep2wake_show, s2w_sweep2wake_dump);
 
-static ssize_t s2w_s2w_s2sonly_show(struct device *dev,
+static ssize_t sweep2dim_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	size_t count = 0;
 
-	count += sprintf(buf, "%d\n", s2w_s2sonly);
+	count += sprintf(buf, "%d\n", s2d_enabled);
 
 	return count;
 }
 
-static ssize_t s2w_s2w_s2sonly_dump(struct device *dev,
+static ssize_t sweep2dim_dump(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
-                if (s2w_s2sonly != buf[0] - '0')
-		        s2w_s2sonly = buf[0] - '0';
+                if (s2d_enabled != buf[0] - '0')
+		        s2d_enabled = buf[0] - '0';
 
 	return count;
 }
 
-static DEVICE_ATTR(s2w_s2sonly, (S_IWUSR|S_IRUGO),
-	s2w_s2w_s2sonly_show, s2w_s2w_s2sonly_dump);
-
-static ssize_t s2w_version_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	size_t count = 0;
-
-	count += sprintf(buf, "%s\n", DRIVER_VERSION);
-
-	return count;
-}
-
-static ssize_t s2w_version_dump(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	return count;
-}
-
-static DEVICE_ATTR(sweep2wake_version, (S_IWUSR|S_IRUGO),
-	s2w_version_show, s2w_version_dump);
+static DEVICE_ATTR(sweep2dim, (S_IWUSR|S_IRUGO),
+	sweep2dim_show, sweep2dim_dump);
 
 /*
  * INIT / EXIT stuff below here
@@ -593,7 +612,7 @@ static int __init sweep2wake_init(void)
 		pr_err("%s: Failed to register s2w_input_handler\n", __func__);
 
 #ifdef CONFIG_POWERSUSPEND
-	register_power_suspend(&s2w_power_suspend_handler);
+	register_power_suspend(&s2w_early_suspend_handler);
 #endif
 
 #ifndef ANDROID_TOUCH_DECLARED
@@ -606,13 +625,9 @@ static int __init sweep2wake_init(void)
 	if (rc) {
 		pr_warn("%s: sysfs_create_file failed for sweep2wake\n", __func__);
 	}
-	rc = sysfs_create_file(android_touch_kobj, &dev_attr_s2w_s2sonly.attr);
+	rc = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2dim.attr);
 	if (rc) {
-		pr_warn("%s: sysfs_create_file failed for s2w_s2sonly\n", __func__);
-	}
-	rc = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake_version.attr);
-	if (rc) {
-		pr_warn("%s: sysfs_create_file failed for sweep2wake_version\n", __func__);
+		pr_warn("%s: sysfs_create_file failed for sweep2dim\n", __func__);
 	}
 
 err_input_dev:
