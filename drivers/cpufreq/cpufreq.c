@@ -322,18 +322,6 @@ void cpufreq_notify_utilization(struct cpufreq_policy *policy,
 		policy->util = util;
 }
 
-void trace_cpu_state_frequency(unsigned int cpu, int online)
-{
-	if (online) {
-		struct cpufreq_policy *policy = per_cpu(cpufreq_cpu_data, cpu);
-		if (policy) {
-			trace_cpu_frequency(policy->cur, cpu);
-		}
-	} else {
-		trace_cpu_frequency(0, cpu);
-	}
-}
-
 /*********************************************************************
  *                          SYSFS INTERFACE                          *
  *********************************************************************/
